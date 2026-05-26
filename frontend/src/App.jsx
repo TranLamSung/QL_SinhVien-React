@@ -1,25 +1,23 @@
 import React, { useState, useEffect } from "react";
+import { useSelector, useDispatch } from "react-redux";
+import { logout } from "./store/authSlice";
+import { authService, studentService } from "./services/api";
 import LoginScreen from "./components/LoginScreen";
 import AddStudentForm from "./components/AddStudentForm";
 import FilterBar from "./components/FilterBar";
 import StudentTable from "./components/StudentTable";
+import ClassManager from "./components/ClassManger";
 import { useDebounce } from "./components/useDebounce";
-import { ToastContainer, toast } from "react-toastify";
+import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 
-
 function App() {
-  const [user, setUser] = useState(() => {
-    const token = localStorage.getItem("token");
-    const savedUsername = localStorage.getItem("username");
-    const savedRole = localStorage.getItem("role");
+  const dispatch = useDispatch();
 
-    return token && savedUsername && savedRole
-      ? { logged_in: true, username: savedUsername, role: savedRole }
-      : { logged_in: false, username: "", role: "" };
-  });
+  const { isLoggedIn, username } = useSelector((state) => state.auth);
+
   const [students, setStudents] = useState([]);
-  const [loading, setLoading] = useState(false); // 🌟 State quản lý trạng thái tải dữ liệu
+  const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState(1);
@@ -28,71 +26,51 @@ function App() {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [editingStudent, setEditingStudent] = useState(null);
 
-  const handleLogout = (message = "Đã đăng xuất hệ thống!") => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("username");
-    localStorage.removeItem("role");
-
-    setUser({ logged_in: false, username: "", role: "" });
-    setStudents([]);
-    toast.warn(message, { position: "top-right", autoClose: 3000 });
-  };
-
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    const savedUsername = localStorage.getItem("username");
+    if (!isLoggedIn) return;
 
-    if (token && savedUsername) {
-      setUser({ logged_in: true, username: savedUsername });
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!user.logged_in) return;
     setLoading(true);
-    fetch(
-      `http://127.0.0.1:5000/api/students?search=${debouncedSearch}&status=${status}&page=${page}`,
-    )
+    studentService
+      .getStudents(debouncedSearch, status, page)
       .then((res) => {
-        if (res.status == 401) {
-          handleLogout();
-          throw new Error("Phiên làm việc đã hết hạn, vui lòng đăng nhập lại!");
+        const fetchedStudents = res.data.students || [];
+        const fetchedTotalPages = res.data.total_pages || 1;
+
+        if (page > fetchedTotalPages && fetchedTotalPages > 0) {
+          setPage(fetchedTotalPages); // Ép ứng dụng quay về trang trước đó
+        } else {
+          setStudents(fetchedStudents);
+          setTotalPages(fetchedTotalPages);
         }
-        return res.json();
       })
-      .then((data) => {
-        setStudents(data.students || []);
-        setTotalPages(data.total_pages || 1);
+      .catch((err) => {
+        console.error("Lỗi tải danh sách sinh viên:", err);
       })
-      .catch((err) => console.error("Lỗi tải sinh viên:", err))
       .finally(() => {
-        setLoading(false); // 🌟 2. Tắt loading dù fetch thành công hay thất bại
+        setLoading(false);
       });
-  }, [debouncedSearch, status, page, refreshTrigger, user.logged_in]);
+  }, [isLoggedIn, debouncedSearch, status, page, refreshTrigger]);
 
   useEffect(() => {
     setPage(1);
-  }, [search, status]);
+  }, [debouncedSearch, status]);
 
   return (
-    <div className="container mt-4" style={{ maxWidth: "950px" }}>
-      <div className="d-flex justify-content-between align-items-center bg-white p-3 rounded shadow-sm border mb-4">
-        <div>
-          <h4 className="mb-0 text-primary fw-bold">
-            🎓 PORTAL QUẢN LÝ SINH VIÊN
-          </h4>
-          <small className="text-muted">
-            Hệ thống Full-stack React + Flask + SQLite
-          </small>
-        </div>
-        {user.logged_in && (
+    <div className="container py-4">
+      <div className="d-flex justify-content-between align-items-center mb-4 p-3 bg-white rounded shadow-sm border">
+        <h2 className="mb-0 fw-bold text-dark">🎓 HỆ THỐNG QUẢN LÝ SINH VIÊN V3</h2>
+        {isLoggedIn && (
           <div className="d-flex align-items-center gap-3">
-            <span className="badge bg-success py-2 px-3 text-uppercase fs-6">
-              Hi, {user.username}
+            <span className="fw-bold text-secondary">
+              Xin chào, <span className="text-primary">{username}</span>!
             </span>
             <button
-              className="btn btn-sm btn-danger fw-bold"
-              onClick={() => handleLogout()}
+              className="btn btn-sm btn-danger fw-bold shadow-sm"
+              onClick={() => {
+                authService.logout().then(() => {
+                  dispatch(logout());
+                });
+              }}
             >
               Đăng xuất 🔒
             </button>
@@ -100,21 +78,20 @@ function App() {
         )}
       </div>
 
-      {!user.logged_in ? (
-        <LoginScreen
-          onLoginSuccess={(name, role) => {
-            console.log("React nhận được role từ LoginScreen:", role);
-            setUser({ logged_in: true, username: name, role: role });
-          }}
-        />
+      {!isLoggedIn ? (
+        <LoginScreen />
       ) : (
         <>
           <AddStudentForm
             onStudentAdded={() => setRefreshTrigger((p) => p + 1)}
             editingStudent={editingStudent}
             clearEdit={() => setEditingStudent(null)}
-            forceLogout={handleLogout}
-            userRole={user?.role}
+            refreshTrigger={refreshTrigger}
+          />
+          <ClassManager
+            onClassDeleted={() => setRefreshTrigger((p) => p + 1)}
+            refreshTrigger={refreshTrigger}
+
           />
           <FilterBar
             search={search}
@@ -139,8 +116,6 @@ function App() {
               currentPage={page}
               totalPages={totalPages}
               setPage={setPage}
-              forceLogout={handleLogout}
-              userRole={user?.role}
             />
           )}
         </>
