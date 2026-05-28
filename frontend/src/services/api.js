@@ -111,4 +111,22 @@ export const studentService = {
   addStudent: (data) => api.post("/add_student", data),
   updateStudent: (id, data) => api.post(`/update/${id}`, data),
   deleteStudent: (id) => api.delete(`/delete/${id}`),
+  exportExcel: () => {
+    const token = store.getState().auth.token; // Lấy token từ Redux
+    return axios.get("http://127.0.0.1:5000/api/export_excel", {
+      headers: {
+        Authorization: `Bearer ${token}` // Truyền token bằng tay để bỏ qua bộ Interceptor lỗi
+      },
+      responseType: "blob" // Ép kiểu dòng nhị phân nguyên bản
+    });
+  },
+  importExcel: (fileData) => {
+    const token = store.getState().auth.token;
+    return axios.post("http://127.0.0.1:5000/api/import_excel", fileData, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "multipart/form-data" // Quy định gửi file dữ liệu nặng
+      }
+    });
+  }
 };

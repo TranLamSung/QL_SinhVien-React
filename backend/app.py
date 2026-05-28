@@ -1,11 +1,16 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy 
 from flask_cors import CORS 
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+import io
 import os 
 import jwt
 import datetime
+
 
 app = Flask(__name__)
 
@@ -322,6 +327,193 @@ def delete_student(current_user_id, id):
     db.session.commit()
     return jsonify({"message": "Xóa thành công!"}), 200
 
+# --- API 8: Xuất toàn bộ danh sách sinh viên ra file Excel (Bảo vệ bằng Quyền Admin) ---
+@app.route("/api/export_excel", methods=["GET"])
+@admin_required
+def export_excel(current_user_id):
+    try:
+        # 1. Lấy toàn bộ danh sách sinh viên từ Database
+        students = Student.query.all()
+        
+        # 2. Khởi tạo một file Excel mới
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Danh sách Sinh viên"
+        
+        # 3. Định nghĩa các kiểu trang trí (Styles)
+        font_title = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+        font_header = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+        font_data = Font(name="Arial", size=11)
+        
+        fill_title = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        fill_header = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
+        
+        align_center = Alignment(horizontal="center", vertical="center")
+        align_left = Alignment(horizontal="left", vertical="center")
+        
+        border_thin = Border(
+            left=Side(style='thin', color='D9D9D9'),
+            right=Side(style='thin', color='D9D9D9'),
+            top=Side(style='thin', color='D9D9D9'),
+            bottom=Side(style='thin', color='D9D9D9')
+        )
+
+        # 4. Tạo dòng tiêu đề lớn (Gộp từ cột A đến E)
+        ws.merge_cells("A1:E1")
+        ws["A1"] = "DANH SÁCH TỔNG HỢP SINH VIÊN TOÀN TRƯỜNG"
+        ws["A1"].font = font_title
+        ws["A1"].fill = fill_title
+        ws["A1"].alignment = align_center
+        ws.row_dimensions[1].height = 40
+        
+        # 5. Tạo hàng Tiêu đề các cột
+        headers = ["STT", "Họ tên Sinh viên", "Tuổi", "Điểm số", "Lớp học"]
+        ws.append([]) # Dòng 2 trống
+        ws.append(headers) # Dòng 3 điền headers
+        
+        ws.row_dimensions[3].height = 25
+        for col_num, header in enumerate(headers, 1):
+            cell = ws.cell(row=3, column=col_num)
+            cell.font = font_header
+            cell.fill = fill_header
+            cell.alignment = align_center
+            cell.border = border_thin
+            
+        # 6. Đổ dữ liệu Sinh viên vào từ dòng số 4
+        for idx, sv in enumerate(students, start=1):
+            name_class = sv.class_ref.name if sv.class_ref else "Chưa xếp lớp"
+            row_data = [idx, sv.name, sv.age, sv.score, name_class]
+            ws.append(row_data)
+            
+            current_row = 3 + idx
+            ws.row_dimensions[current_row].height = 20
+            
+            for col_num in range(1, 6):
+                cell = ws.cell(row=current_row, column=col_num)
+                cell.font = font_data
+                cell.border = border_thin
+                if col_num in [1, 3, 4]:
+                    cell.alignment = align_center
+                else:
+                    cell.alignment = align_left
+
+        # 7. Tự động căn chỉnh độ rộng các cột (Tránh lỗi MergedCell)
+        for col in ws.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                if cell.row == 1:
+                    continue
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+            ws.column_dimensions[col_letter].width = max(max_len + 5, 12)
+
+        # 🌟 BƯỚC THAY ĐỔI QUAN TRỌNG: Ghi dữ liệu sạch tuyệt đối vào luồng Bytes
+        excel_stream = io.BytesIO()
+        wb.save(excel_stream)
+        excel_stream.seek(0) # Đưa con trỏ đọc về vị trí xuất phát đầu tiên
+
+        # Tạo tên file đính kèm
+        file_name = f"Danh_Sach_Sinh_Vien_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        # 🌟 ÉP PHẢI TRẢ VỀ DẠNG SEND_FILE CHUẨN ĐỊNH DẠNG KHÔNG BỊ TRỘN LOG
+        return send_file(
+            excel_stream,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=file_name
+        )
+        
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc()) # In chi tiết lỗi ra Terminal để debug nếu sập
+        return jsonify({"error": f"Lỗi xuất Excel: {str(e)}"}), 500
+
+# --- API 9: Nhập dữ liệu sinh viên hàng loạt từ file Excel (Bảo vệ bằng Quyền Admin) ---
+@app.route("/api/import_excel", methods=["POST"])
+@admin_required
+def import_excel(current_user_id):
+    try:
+        # 1. Kiểm tra xem Frontend có gửi file lên không
+        if "file" not in request.files:
+            return jsonify({"error": "Không tìm thấy file tải lên!"}), 400
+            
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "Tên file trống!"}), 400
+            
+        # 🌟 ĐOẠN SỬA LỖI 500 CHÍ MẠNG: Đọc file an toàn sử dụng Workbook
+        from openpyxl import load_workbook # Thêm dòng này ngay tại đây cho chắc chắn
+        
+        # Đọc trực tiếp file dữ liệu nhị phân gửi từ client lên
+        wb = load_workbook(file, data_only=True) 
+        ws = wb.active # Lấy Sheet hoạt động đầu tiên
+        
+        success_count = 0
+        errors = []
+        
+        # 3. Duyệt qua từng dòng trong file Excel (Bắt đầu từ dòng số 4)
+        for row_idx, row in enumerate(ws.iter_rows(min_row=4, values_only=True), start=4):
+            if not row or row[1] is None:
+                continue
+                
+            try:
+                name = str(row[1]).strip()
+                age = int(row[2])
+                score = float(row[3])
+                class_name = str(row[4]).strip() if row[4] is not None else ""
+                
+                # Tìm hoặc tạo ID lớp học dựa vào tên lớp
+                id_class = None
+                if class_name:
+                    cls = Class.query.filter_by(name=class_name).first()
+                    if cls:
+                        id_class = cls.id
+                    else:
+                        new_cls = Class(name=class_name)
+                        db.session.add(new_cls)
+                        db.session.commit()
+                        id_class = new_cls.id
+                
+                # 🌟 ĐOẠN KIỂM TRA TRÙNG LẶP DỮ LIỆU CHÍ MẠNG:
+                # Tìm xem trong DB đã có sinh viên trùng cả Tên và Lớp học này chưa
+                existing_student = Student.query.filter_by(name=name, idClass=id_class).first()
+                
+                if existing_student:
+                    # TÌNH HUỐNG 1: Đã tồn tại -> Cập nhật thông tin mới nhất (Tuổi, Điểm)
+                    existing_student.age = age
+                    existing_student.score = score
+                else:
+                    # TÌNH HUỐNG 2: Chưa tồn tại -> Tiến hành thêm mới như bình thường
+                    new_student = Student(
+                        name=name,
+                        age=age,
+                        score=score,
+                        idClass=id_class
+                    )
+                    db.session.add(new_student)
+                    
+                success_count += 1
+                
+            except Exception as row_error:
+                errors.append(f"Dòng {row_idx}: {str(row_error)}")
+                
+        # 4. Lưu toàn bộ sinh viên hợp lệ vào Database
+        if success_count > 0:
+            db.session.commit()
+            
+        return jsonify({
+            "message": f"Nhập dữ liệu thành công {success_count} sinh viên!",
+            "errors": errors
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        # In chi tiết lỗi ra Terminal của Flask để dễ theo dõi
+        import traceback
+        print("LỖI IMPORT EXCEL CHI TIẾT:")
+        print(traceback.format_exc())
+        return jsonify({"error": f"Lỗi xử lý file Excel: {str(e)}"}), 500
 
 # =========================================================================
 # 4. HÀM KHỞI TẠO DỮ LIỆU MẪU RIÊNG BIỆT (SEED DATA FUNCTION)
